@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <!-- net10.0-windows to match the host; its APIs are [SupportedOSPlatform("windows")], so a
+         plain net10.0 plugin raises CA1416 on every host call. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <NoWarn>1701;1702;1591</NoWarn>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      HealthBars builds against the OriathHub.Sdk package (the same way an external author would),
+      not the OriathHub source tree. OriathHub.Sdk must be available from a configured NuGet source.
+      The package's OriathHub/GameOffsets references are compile-time only, so nothing extra is
+      copied into the output — only HealthBars.dll is deployed to the host.
+    -->
+    <PackageReference Include="OriathHub.Sdk" Version="$(OriathHubSdkVersion)" />
+  </ItemGroup>
+
+  <!-- Deploy the plugin DLL into the running host's Plugins/ folder. Pass -p:OriathHubDir="<path>\" at build time. -->
+  <Target Name="CopyToHostPluginsDir" AfterTargets="Build" Condition="'$(OriathHubDir)' != ''">
+    <Copy SourceFiles="$(OutDir)$(TargetName)$(TargetExt)"
+          DestinationFolder="$(OriathHubDir)Plugins\$(AssemblyName)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Copy textures alongside the DLL so the plugin can load them via DllDirectory. -->
+  <Target Name="CopyTexturesToHost" AfterTargets="Build" Condition="'$(OriathHubDir)' != ''">
+    <ItemGroup>
+      <TextureFiles Include="Textures\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(TextureFiles)"
+          DestinationFolder="$(OriathHubDir)Plugins\$(AssemblyName)\Textures"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
