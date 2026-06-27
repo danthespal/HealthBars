@@ -24,7 +24,7 @@
   <!-- Deploy the plugin DLL into the running host's Plugins/ folder. Pass -p:OriathHubDir="<path>\" at build time. -->
   <Target Name="CopyToHostPluginsDir" AfterTargets="Build" Condition="'$(OriathHubDir)' != ''">
     <Copy SourceFiles="$(OutDir)$(TargetName)$(TargetExt)"
-          DestinationFolder="$(OriathHubDir)Plugins\$(AssemblyName)"
+          DestinationFolder="$(OriathHubDir)\Plugins\$(AssemblyName)"
           SkipUnchangedFiles="true" />
   </Target>
 
@@ -34,7 +34,7 @@
       <TextureFiles Include="Textures\*.*" />
     </ItemGroup>
     <Copy SourceFiles="@(TextureFiles)"
-          DestinationFolder="$(OriathHubDir)Plugins\$(AssemblyName)\Textures"
+          DestinationFolder="$(OriathHubDir)\Plugins\$(AssemblyName)\Textures"
           SkipUnchangedFiles="true" />
   </Target>
 
