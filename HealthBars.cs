@@ -398,7 +398,9 @@ namespace OriathHub.Plugins.HealthBars
                 }
             }
 
-            this.onAreaChange = CoroutineHandler.Start(this.OnAreaChange());
+            // StartCoroutine ties this to the plugin lifetime so the host force-cancels it on
+            // disable/reload/unload even if OnDisable is skipped or throws.
+            this.onAreaChange = this.StartCoroutine(this.OnAreaChange());
         }
 
         /// <inheritdoc />
