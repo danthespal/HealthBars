@@ -50,6 +50,12 @@ namespace OriathHub.Plugins.HealthBars
         public override string Description => "Draws health bars above entities in the game world.";
 
         /// <inheritdoc />
+        public override string Author => "OriathHub";
+
+        /// <inheritdoc />
+        public override string Version => "1.0.0";
+
+        /// <inheritdoc />
         public override void DrawSettings()
         {
             ImGui.Text("Turn off in game health bars for best result.");
