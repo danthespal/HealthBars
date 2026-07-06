@@ -2,6 +2,7 @@ namespace OriathHub.Plugins.HealthBars
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.IO;
     using System.Numerics;
     using Coroutine;
@@ -41,7 +42,13 @@ namespace OriathHub.Plugins.HealthBars
 
         private readonly Dictionary<uint, Vector2> bPositions = new();
 
+        // Per-monster DPS sampling state, keyed by entity id. Populated only for monsters and
+        // cleared on area change (like bPositions); stale entries are pruned each sample tick.
+        private readonly Dictionary<uint, DpsTracker> dpsTrackers = new();
+        private readonly List<uint> staleDpsKeys = new();
+
         private ActiveCoroutine? onAreaChange = null;
+        private ActiveCoroutine? onDpsSample = null;
 
         /// <inheritdoc />
         public override string Name => "Health Bars";
@@ -94,6 +101,20 @@ namespace OriathHub.Plugins.HealthBars
                     ImGui.DragInt4("Cull Strike (%health)", ref this.Settings.CullingStrikeRangePerRarity[0], 1, 0, 100);
                     ImGui.TableNextColumn();
                     ImGui.Checkbox("Show mana rather than ES on self player", ref this.Settings.ShowManaRatherThanESOnSelf);
+                    ImGui.TableNextColumn();
+                    ImGui.DragFloat("Monster DPS window (s)", ref this.Settings.DpsWindowSeconds, 0.05f, 0.25f, 10f);
+                    ImGuiHelper.ToolTip("Sliding window over which monster DPS is averaged. " +
+                        "Shorter = more responsive, longer = smoother.");
+                    ImGui.TableNextColumn();
+                    ImGui.Checkbox("DPS text outline", ref this.Settings.DpsOutline);
+                    if (this.Settings.DpsOutline)
+                    {
+                        ImGui.TableNextColumn();
+                        ImGui.DragFloat("Outline thickness", ref this.Settings.DpsOutlineThickness, 0.1f, 1f, 3f);
+                        ImGui.TableNextColumn();
+                        ImGui.ColorEdit4("Outline color", ref this.Settings.DpsOutlineColor);
+                    }
+
                     ImGui.EndTable();
                 }
             }
@@ -117,7 +138,7 @@ namespace OriathHub.Plugins.HealthBars
                 {
                     if (ImGui.BeginTabItem(item.Key))
                     {
-                        item.Value.Draw();
+                        item.Value.Draw(true);
                         ImGui.EndTabItem();
                     }
                 }
@@ -174,7 +195,7 @@ namespace OriathHub.Plugins.HealthBars
                         var shouldNotDelete = true;
                         if (ImGui.BeginTabItem(text, ref shouldNotDelete, ImGuiTabItemFlags.NoAssumedClosure))
                         {
-                            conf.Value.Draw();
+                            conf.Value.Draw(true);
                             ImGui.EndTabItem();
                         }
 
@@ -221,6 +242,18 @@ namespace OriathHub.Plugins.HealthBars
             }, "culling strike rarity white magic rare unique"),
             new SettingSearchEntry("Common Configuration", "Show mana rather than ES on self player",
                 () => ImGui.Checkbox("Show mana rather than ES on self player", ref this.Settings.ShowManaRatherThanESOnSelf), "mana es energy shield self"),
+            new SettingSearchEntry("Common Configuration", "Monster DPS window (s)",
+                () => ImGui.DragFloat("Monster DPS window (s)", ref this.Settings.DpsWindowSeconds, 0.05f, 0.25f, 10f),
+                "dps damage per second window drained monster"),
+            new SettingSearchEntry("Common Configuration", "DPS text outline", () =>
+            {
+                ImGui.Checkbox("DPS text outline", ref this.Settings.DpsOutline);
+                if (this.Settings.DpsOutline)
+                {
+                    ImGui.DragFloat("Outline thickness", ref this.Settings.DpsOutlineThickness, 0.1f, 1f, 3f);
+                    ImGui.ColorEdit4("Outline color", ref this.Settings.DpsOutlineColor);
+                }
+            }, "dps text outline border thickness color legibility"),
 
             new SettingSearchEntry("Monster Configuration", "Monster Configuration", this.DrawMonsterConfig,
                 "monster rarity white magic rare unique bar color"),
@@ -384,6 +417,9 @@ namespace OriathHub.Plugins.HealthBars
             this.textures.cleanup(this.TexturesPath);
             this.onAreaChange?.Cancel();
             this.onAreaChange = null;
+            this.onDpsSample?.Cancel();
+            this.onDpsSample = null;
+            this.dpsTrackers.Clear();
         }
 
         /// <inheritdoc />
@@ -407,6 +443,7 @@ namespace OriathHub.Plugins.HealthBars
             // StartCoroutine ties this to the plugin lifetime so the host force-cancels it on
             // disable/reload/unload even if OnDisable is skipped or throws.
             this.onAreaChange = this.StartCoroutine(this.OnAreaChange());
+            this.onDpsSample = this.StartCoroutine(this.SampleDps());
         }
 
         /// <inheritdoc />
@@ -523,6 +560,64 @@ namespace OriathHub.Plugins.HealthBars
                 ptr.AddText(start - this.fontSize, ImGuiHelper.Color(healthbarConfig.TextColor),
                     this.healthToHumanReadable(textValue));
             }
+
+            // DPS readout below the bar. Only monsters get trackers (see SampleDps), so player
+            // bars never have an entry here even though the flag lives on the shared Config.
+            if (healthbarConfig.ShowDps && this.dpsTrackers.TryGetValue(entity.Id, out var dpsTracker))
+            {
+                var dps = dpsTracker.CurrentDps();
+                if (dps > 0f)
+                {
+                    var dpsY = end.Y;
+                    if (hComp.Ward.Total > 0 && healthbarConfig.WardMode == WardDisplayMode.SeparateBar)
+                    {
+                        // Clear the dedicated ward bar that sits directly under the main bar.
+                        dpsY += 1f + healthbarConfig.WardBarHeight;
+                    }
+
+                    AddTextOutlined(ptr, new Vector2(start.X, dpsY + 1f),
+                        ImGuiHelper.Color(healthbarConfig.DpsColor), DpsToHumanReadable(dps),
+                        ImGuiHelper.Color(this.Settings.DpsOutlineColor),
+                        this.Settings.DpsOutline ? this.Settings.DpsOutlineThickness : 0f);
+                }
+            }
+        }
+
+        // ImGui has no outlined text, so draw the string in the outline colour at the eight
+        // offsets around the centre (4 cardinal + 4 diagonal), then the coloured text on top -
+        // a cheap, legible border over any background. thickness <= 0 skips the outline.
+        private static void AddTextOutlined(ImDrawListPtr ptr, Vector2 pos, uint color, string text,
+            uint outlineColor, float thickness)
+        {
+            if (thickness > 0f)
+            {
+                ptr.AddText(pos + new Vector2(-thickness, 0f), outlineColor, text);
+                ptr.AddText(pos + new Vector2(thickness, 0f), outlineColor, text);
+                ptr.AddText(pos + new Vector2(0f, -thickness), outlineColor, text);
+                ptr.AddText(pos + new Vector2(0f, thickness), outlineColor, text);
+                ptr.AddText(pos + new Vector2(-thickness, -thickness), outlineColor, text);
+                ptr.AddText(pos + new Vector2(thickness, -thickness), outlineColor, text);
+                ptr.AddText(pos + new Vector2(-thickness, thickness), outlineColor, text);
+                ptr.AddText(pos + new Vector2(thickness, thickness), outlineColor, text);
+            }
+
+            ptr.AddText(pos, color, text);
+        }
+
+        private static string DpsToHumanReadable(float value)
+        {
+            if (value >= 1_000_000f)
+            {
+                return $"{(value / 1_000_000f):0.00}M/s";
+            }
+            else if (value >= 1_000f)
+            {
+                return $"{(value / 1_000f):0.00}K/s";
+            }
+            else
+            {
+                return $"{value:0}/s";
+            }
         }
 
         private void UpdateOncePerDraw()
@@ -577,6 +672,152 @@ namespace OriathHub.Plugins.HealthBars
             {
                 yield return new Wait(RemoteEvents.AreaChanged);
                 this.bPositions.Clear();
+                this.dpsTrackers.Clear();
+            }
+        }
+
+        /// <summary>
+        ///     Samples every monster's effective HP pool (Life + ES + Ward) once per data phase and
+        ///     feeds it to a per-entity <see cref="DpsTracker"/>. Runs on PerFrameDataUpdate (not the
+        ///     render loop) so measurement is decoupled from whether bars are actually drawn.
+        /// </summary>
+        private IEnumerator<Wait> SampleDps()
+        {
+            while (true)
+            {
+                yield return new Wait(OriathEvents.PerFrameDataUpdate);
+                if (Core.States.GameCurrentState != GameStateTypes.InGameState)
+                {
+                    continue;
+                }
+
+                var now = Stopwatch.GetTimestamp();
+                var windowTicks = (long)(Math.Max(0.25f, this.Settings.DpsWindowSeconds) * Stopwatch.Frequency);
+                // Drop trackers whose entity hasn't been seen for two windows (despawned / out of
+                // range) so the dictionary stays bounded within a long-lived area.
+                var staleTicks = windowTicks * 2;
+
+                var cAreaInstance = Core.States.InGameStateObject.CurrentAreaInstance;
+                foreach (var kv in cAreaInstance.AwakeEntities)
+                {
+                    var entity = kv.Value;
+                    if (entity.EntityType != EntityTypes.Monster || !entity.IsValid)
+                    {
+                        continue;
+                    }
+
+                    if (!entity.TryGetComponent<Life>(out var life) || !life.IsAlive)
+                    {
+                        continue;
+                    }
+
+                    var pool = life.Health.Current + life.EnergyShield.Current + life.Ward.Current;
+                    if (!this.dpsTrackers.TryGetValue(entity.Id, out var tracker))
+                    {
+                        tracker = new DpsTracker();
+                        this.dpsTrackers[entity.Id] = tracker;
+                    }
+
+                    tracker.Sample(pool, now, windowTicks);
+                }
+
+                this.staleDpsKeys.Clear();
+                foreach (var kv in this.dpsTrackers)
+                {
+                    if (now - kv.Value.LastTouchedTicks > staleTicks)
+                    {
+                        this.staleDpsKeys.Add(kv.Key);
+                    }
+                }
+
+                for (var i = 0; i < this.staleDpsKeys.Count; i++)
+                {
+                    this.dpsTrackers.Remove(this.staleDpsKeys[i]);
+                }
+            }
+        }
+
+        /// <summary>
+        ///     Tracks the effective-HP samples of a single monster over a sliding time window and
+        ///     derives a gross "drained per second" rate. Only decreases (damage) are counted; pool
+        ///     increases from regen, ES recharge or ward refresh are ignored, so the reading reflects
+        ///     damage dealt rather than net change.
+        /// </summary>
+        private sealed class DpsTracker
+        {
+            // One sample per data tick, trimmed to the window. A 1 s window at 60-144 fps holds
+            // ~60-150 entries - cheap - and the Queue trims in O(1), so no throttling is needed
+            // (an earlier interval throttle silently stalled the buffer at a single sample).
+            private readonly Queue<(long Ticks, int Pool)> samples = new();
+
+            /// <summary>Timestamp of the most recent <see cref="Sample"/> call (for staleness pruning).</summary>
+            public long LastTouchedTicks { get; private set; }
+
+            /// <summary>Records a new pool reading and trims samples outside the window.</summary>
+            public void Sample(int pool, long now, long windowTicks)
+            {
+                // A gap longer than the window means we lost continuity (plugin idle, entity
+                // re-appeared under a reused id) - restart rather than charge one huge delta.
+                if (this.samples.Count > 0 && now - this.LastTouchedTicks > windowTicks)
+                {
+                    this.samples.Clear();
+                }
+
+                this.LastTouchedTicks = now;
+                this.samples.Enqueue((now, pool));
+
+                var cutoff = now - windowTicks;
+                while (this.samples.Count > 1 && this.samples.Peek().Ticks < cutoff)
+                {
+                    this.samples.Dequeue();
+                }
+            }
+
+            /// <summary>Gross effective-HP drained per second across the retained window.</summary>
+            public float CurrentDps()
+            {
+                if (this.samples.Count < 2)
+                {
+                    return 0f;
+                }
+
+                var totalDrop = 0L;
+                var hasPrev = false;
+                var prevPool = 0;
+                long firstTicks = 0;
+                long lastTicks = 0;
+                foreach (var (ticks, sPool) in this.samples)
+                {
+                    if (!hasPrev)
+                    {
+                        firstTicks = ticks;
+                    }
+                    else
+                    {
+                        var delta = prevPool - sPool;
+                        if (delta > 0)
+                        {
+                            totalDrop += delta;
+                        }
+                    }
+
+                    lastTicks = ticks;
+                    prevPool = sPool;
+                    hasPrev = true;
+                }
+
+                if (totalDrop <= 0)
+                {
+                    return 0f;
+                }
+
+                var spanTicks = lastTicks - firstTicks;
+                if (spanTicks <= 0)
+                {
+                    return 0f;
+                }
+
+                return totalDrop / (spanTicks / (float)Stopwatch.Frequency);
             }
         }
     }

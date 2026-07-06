@@ -1,6 +1,7 @@
 namespace OriathHub.Plugins.HealthBars
 {
     using System.Collections.Generic;
+    using System.Numerics;
 
     /// <summary>
     ///     HealthBars plugin settings class.
@@ -41,6 +42,27 @@ namespace OriathHub.Plugins.HealthBars
         ///     Gets a value indicating if user want to see mana on the healthbar rather than energyshield.
         /// </summary>
         public bool ShowManaRatherThanESOnSelf = false;
+
+        /// <summary>
+        ///     Sliding-window length (seconds) over which monster DPS (effective HP drained per
+        ///     second) is measured. Shorter = more responsive, longer = smoother.
+        /// </summary>
+        public float DpsWindowSeconds = 1f;
+
+        /// <summary>
+        ///     Draw an outline (border) around the DPS text for legibility.
+        /// </summary>
+        public bool DpsOutline = true;
+
+        /// <summary>
+        ///     Outline offset in pixels around the DPS text. Larger = heavier border.
+        /// </summary>
+        public float DpsOutlineThickness = 1f;
+
+        /// <summary>
+        ///     Colour of the DPS text outline.
+        /// </summary>
+        public Vector4 DpsOutlineColor = new(0f, 0f, 0f, 1f);
 
         /// <summary>
         ///     Healthbar config for monsters.

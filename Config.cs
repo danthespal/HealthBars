@@ -85,6 +85,17 @@ namespace OriathHub.Plugins.HealthBars
         public bool ShowWardInText;
 
         /// <summary>
+        ///     Show a live DPS (effective HP drained per second) readout under the bar.
+        ///     Monster bars only; the plugin never tracks DPS for player bars.
+        /// </summary>
+        public bool ShowDps;
+
+        /// <summary>
+        ///     Colour of the DPS readout text.
+        /// </summary>
+        public Vector4 DpsColor;
+
+        /// <summary>
         ///     Gets the color of the next.
         /// </summary>
         public Vector4 TextColor;
@@ -138,6 +149,8 @@ namespace OriathHub.Plugins.HealthBars
             this.WardMode = WardDisplayMode.BehindLife;
             this.WardBarHeight = 8f;
             this.ShowWardInText = true;
+            this.ShowDps = false;
+            this.DpsColor = new(1f, 0.4f, 0.4f, 1f);
             this.TextColor = new(0f, 1f, 1f, 1f);
             this.Scale = new(128f, sizeY);
             this.HalfOfScale = this.Scale / 2;
@@ -181,7 +194,11 @@ namespace OriathHub.Plugins.HealthBars
         /// <summary>
         ///     Display the Config on imgui.
         /// </summary>
-        public void Draw()
+        /// <param name="supportsDps">
+        ///     When true, exposes the DPS readout options. Only monster bars support DPS; player
+        ///     bars pass false so the inert options are hidden.
+        /// </param>
+        public void Draw(bool supportsDps = false)
         {
             ImGui.Text("NOTE: For going above/below the limit, or for manual editing, press CTRL + Left Mouse Button click.");
             if (ImGui.BeginTable("config_table", 2))
@@ -235,6 +252,19 @@ namespace OriathHub.Plugins.HealthBars
 
                 ImGui.TableNextColumn();
                 ImGui.Checkbox("Include ward in text", ref this.ShowWardInText);
+                if (supportsDps)
+                {
+                    ImGui.TableNextColumn();
+                    ImGui.Checkbox("Show DPS (drained/s)", ref this.ShowDps);
+                    ImGuiHelper.ToolTip("Effective HP (Life + ES + Ward) drained per second, " +
+                        "measured over the window set in Common Configuration.");
+                    if (this.ShowDps)
+                    {
+                        ImGui.TableNextColumn();
+                        ImGui.ColorEdit4("DPS Text Color", ref this.DpsColor);
+                    }
+                }
+
                 ImGui.EndTable();
             }
         }
