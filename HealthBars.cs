@@ -338,6 +338,11 @@ namespace OriathHub.Plugins.HealthBars
                             break;
                         }
 
+                        if (IsSyntheticHiddenMonster(entity.Value))
+                        {
+                            break;
+                        }
+
                         if (entity.Value.EntitySubtype == EntitySubtypes.POIMonster)
                         {
                             if (!monsterTargetable)
@@ -409,6 +414,50 @@ namespace OriathHub.Plugins.HealthBars
             return entity.TryGetComponent<ObjectMagicProperties>(out var oComp) &&
                 oComp.ModNames.Contains("RateLimitedDaemon") &&
                 oComp.ModNames.Contains("MonsterNoDropsOrExperience");
+        }
+
+        /// <summary>
+        ///     Determines whether an entity is an invisible, invulnerable, non-reward controller
+        ///     that exists beside its real combat entity. Such controllers inherit the combat
+        ///     entity's life and modifiers, but must not produce a second health bar.
+        /// </summary>
+        private static bool IsSyntheticHiddenMonster(Entity entity)
+        {
+            if (!entity.TryGetComponent<Stats>(out var stats))
+            {
+                return false;
+            }
+
+            // Some hidden monsters explicitly request a mini life bar, so never suppress them.
+            if (HasActiveStat(stats, GameStats.hidden_monster_force_mini_life_bar))
+            {
+                return false;
+            }
+
+            var cannotBeDamaged = HasActiveStat(stats, GameStats.base_cannot_be_damaged) ||
+                HasActiveStat(stats, GameStats.cannot_be_damaged);
+            var ignoredByEnemyTargetSelection =
+                HasActiveStat(stats, GameStats.ignored_by_enemy_target_selection) ||
+                HasActiveStat(stats, GameStats.base_ignored_by_enemy_target_selection);
+
+            return cannotBeDamaged &&
+                HasActiveStat(stats, GameStats.is_hidden_monster) &&
+                ignoredByEnemyTargetSelection &&
+                HasActiveStat(stats, GameStats.monster_no_drops_or_experience);
+        }
+
+        /// <summary>
+        ///     Gets whether an effective entity stat is active. Buff/action values take precedence
+        ///     over item values, matching the host entity-state stat lookup.
+        /// </summary>
+        private static bool HasActiveStat(Stats stats, GameStats stat)
+        {
+            if (stats.StatsChangedByBuffAndActions.TryGetValue(stat, out var value))
+            {
+                return value > 0;
+            }
+
+            return stats.StatsChangedByItems.TryGetValue(stat, out value) && value > 0;
         }
 
         /// <inheritdoc />
