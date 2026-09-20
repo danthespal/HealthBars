@@ -1,4 +1,4 @@
-namespace OriathHub.Plugins.HealthBars
+﻿namespace OriathHub.Plugins.HealthBars
 {
     using System;
     using System.Collections.Generic;
@@ -50,6 +50,13 @@ namespace OriathHub.Plugins.HealthBars
         private ActiveCoroutine? onAreaChange = null;
         private ActiveCoroutine? onDpsSample = null;
 
+        /// <summary>
+        ///     Name of the required texture that could not be loaded, or empty when all are present.
+        ///     Drawing is skipped entirely while this is set, because <see cref="TextureLoader.GetTexture" />
+        ///     would otherwise throw once per bar per frame.
+        /// </summary>
+        private string missingTexture = string.Empty;
+
         /// <inheritdoc />
         public override string Name => "Health Bars";
 
@@ -60,7 +67,11 @@ namespace OriathHub.Plugins.HealthBars
         public override string Author => "OriathHub";
 
         /// <inheritdoc />
-        public override string Version => "1.0.0";
+#if DEBUG
+        public override string Version => "0.0.0-dev";
+#else
+        public override string Version => PluginVersion.Value;
+#endif
 
         /// <inheritdoc />
         public override void DrawSettings()
@@ -68,6 +79,14 @@ namespace OriathHub.Plugins.HealthBars
             ImGui.Text("Turn off in game health bars for best result.");
             ImGui.Text("Enable/Disable plugin to reload textures.");
             ImGui.Text($"Total Textures loaded: {this.textures.TotalTexturesLoaded}");
+            if (this.missingTexture.Length > 0)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.4f, 0.4f, 1f));
+                ImGui.TextWrapped(
+                    $"Missing texture '{this.missingTexture}' in {this.TexturesPath}. " +
+                    "Health bars stay hidden until it is restored; re-enable the plugin to retry.");
+                ImGui.PopStyleColor();
+            }
             if (ImGui.CollapsingHeader("Common Configuration"))
             {
                 if (ImGui.BeginTable("common_config_table", 2))
@@ -266,6 +285,11 @@ namespace OriathHub.Plugins.HealthBars
         /// <inheritdoc />
         public override void DrawUI()
         {
+            if (this.missingTexture.Length > 0)
+            {
+                return;
+            }
+
             if (Core.States.GameCurrentState != GameStateTypes.InGameState)
             {
                 return;
@@ -479,13 +503,23 @@ namespace OriathHub.Plugins.HealthBars
             {
                 var content = File.ReadAllText(this.SettingPathname);
                 this.Settings = JsonConvert.DeserializeObject<HealthBarsSettings>(content) ?? new HealthBarsSettings();
+                NormalizeSettings(this.Settings);
             }
 
+            // Report a missing texture instead of throwing. A throw here is swallowed by the host,
+            // which leaves the plugin flagged Enabled with its coroutines never started — bars are
+            // silently absent and the only clue is a log line. Record the failure instead, gate
+            // drawing on it, and surface it in the settings tab.
+            this.missingTexture = string.Empty;
             for (var i = 0; i < this.textureToValidate.Count; i++)
             {
                 if (!this.textures.TextureKeys.Contains(this.textureToValidate[i]))
                 {
-                    throw new Exception($"Missing texture file {this.textureToValidate[i]} in {this.TexturesPath} folder.");
+                    this.missingTexture = this.textureToValidate[i];
+                    Log.Error(
+                        $"Missing texture file {this.missingTexture} in {this.TexturesPath}; health bars are disabled.",
+                        this.Name);
+                    return;
                 }
             }
 
@@ -493,6 +527,68 @@ namespace OriathHub.Plugins.HealthBars
             // disable/reload/unload even if OnDisable is skipped or throws.
             this.onAreaChange = this.StartCoroutine(this.OnAreaChange());
             this.onDpsSample = this.StartCoroutine(this.SampleDps());
+        }
+
+        /// <summary>
+        ///     Repairs anything a saved settings file could hand us that the drawing code assumes.
+        ///     Newtonsoft replaces arrays wholesale rather than merging into the field initializer, so
+        ///     a truncated or absent CullingStrikeRangePerRarity survives deserialization — and both the
+        ///     DragInt4 widget and the per-rarity cull lookup index it by rarity, one of them through a
+        ///     raw pointer into native ImGui that writes four ints regardless of the managed length.
+        /// </summary>
+        private static void NormalizeSettings(HealthBarsSettings settings)
+        {
+            const int rarityCount = 4;
+            if (settings.CullingStrikeRangePerRarity is not { Length: rarityCount })
+            {
+                var repaired = new int[rarityCount] { 30, 20, 10, 5 };
+                var existing = settings.CullingStrikeRangePerRarity;
+                if (existing != null)
+                {
+                    for (var i = 0; i < Math.Min(existing.Length, rarityCount); i++)
+                    {
+                        repaired[i] = existing[i];
+                    }
+                }
+
+                settings.CullingStrikeRangePerRarity = repaired;
+            }
+
+            // DrawUI indexes these by literal key every frame — Player["self"], Monster["white"],
+            // POIMonster[-1] and so on — so a settings file that nulls a dictionary or drops a key
+            // turns into an NRE or KeyNotFoundException per bar per frame. Backfill from a freshly
+            // constructed settings object rather than duplicating the default literals here, so this
+            // stays correct if the defaults ever change.
+            var defaults = new HealthBarsSettings();
+            settings.Monster = BackfillMissing(settings.Monster, defaults.Monster);
+            settings.Player = BackfillMissing(settings.Player, defaults.Player);
+            settings.POIMonster = BackfillMissing(settings.POIMonster, defaults.POIMonster);
+        }
+
+        /// <summary>
+        ///     Returns <paramref name="actual" /> with every key from <paramref name="defaults" />
+        ///     present, or the defaults outright when the saved value was null. Existing entries win.
+        /// </summary>
+        /// <typeparam name="TKey">dictionary key type.</typeparam>
+        /// <param name="actual">the deserialized dictionary, possibly null or incomplete.</param>
+        /// <param name="defaults">a freshly constructed default dictionary.</param>
+        /// <returns>a dictionary safe to index by any default key.</returns>
+        private static Dictionary<TKey, Config> BackfillMissing<TKey>(
+            Dictionary<TKey, Config> actual,
+            Dictionary<TKey, Config> defaults)
+            where TKey : notnull
+        {
+            if (actual == null)
+            {
+                return defaults;
+            }
+
+            foreach (var (key, value) in defaults)
+            {
+                actual.TryAdd(key, value);
+            }
+
+            return actual;
         }
 
         /// <inheritdoc />

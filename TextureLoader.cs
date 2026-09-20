@@ -27,14 +27,16 @@ namespace OriathHub.Plugins.HealthBars
         /// <param name="texturesPath">path to texture folder.</param>
         public void cleanup(string texturesPath)
         {
+            // Drop our entry unconditionally. RemoveImage removes the overlay's own entry first and
+            // then returns whether the *renderer* still held the texture, so a false does not mean
+            // "still loaded" — keeping our entry on a false left this dictionary and the overlay out
+            // of sync, and the next Load() then threw ArgumentException on the duplicate key.
             foreach (var filename in this.loadedTextures.Keys)
             {
-                var pathname = Path.Join(texturesPath, filename);
-                if (Core.Overlay.RemoveImage(pathname))
-                {
-                    this.loadedTextures.Remove(filename);
-                }
+                Core.Overlay.RemoveImage(Path.Join(texturesPath, filename));
             }
+
+            this.loadedTextures.Clear();
         }
 
         /// <summary>
@@ -49,7 +51,10 @@ namespace OriathHub.Plugins.HealthBars
                 {
                     var filename = Path.GetFileName(pathname);
                     Core.Overlay.AddOrGetImagePointer(pathname, false, out var handle, out var w, out var h);
-                    this.loadedTextures.Add(filename, (handle, (int)w, (int)h));
+
+                    // Indexer, not Add: a stale entry must not turn a reload into an
+                    // ArgumentException that escapes OnEnable and leaves the plugin enabled but dead.
+                    this.loadedTextures[filename] = (handle, (int)w, (int)h);
                 }
             }
         }
